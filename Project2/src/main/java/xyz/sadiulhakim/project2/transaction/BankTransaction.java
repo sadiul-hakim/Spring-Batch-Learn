@@ -8,7 +8,7 @@ import java.math.BigDecimal;
 public class BankTransaction {
 
     // Query and row mapper for obtaining bank transactions from the database
-    public static final String SELECT_ALL_QUERY = "select id, month, day, hour, minute, amount, merchant from bank_transaction";
+    public static final String SELECT_ALL_QUERY = "select * from bank_transaction";
     public static final RowMapper<BankTransaction> ROW_MAPPER = (rs, rowNum) -> new BankTransaction(
             rs.getLong("id"),
             rs.getInt("month"),
@@ -16,7 +16,9 @@ public class BankTransaction {
             rs.getInt("hour"),
             rs.getInt("minute"),
             rs.getBigDecimal("amount"),
-            rs.getString("merchant")
+            rs.getString("merchant"),
+            rs.getBigDecimal("balance"),
+            rs.getBoolean("adjusted")
     );
 
     private long id;
@@ -27,8 +29,10 @@ public class BankTransaction {
     private BigDecimal amount;
     private String merchant;
     private BigDecimal balance;
+    private boolean adjusted;
 
-    public BankTransaction(long id, int month, int day, int hour, int minute, BigDecimal amount, String merchant, BigDecimal balance) {
+    public BankTransaction(long id, int month, int day, int hour, int minute, BigDecimal amount, String merchant,
+                           BigDecimal balance, boolean adjusted) {
         this.id = id;
         this.month = month;
         this.day = day;
@@ -37,6 +41,7 @@ public class BankTransaction {
         this.amount = amount;
         this.merchant = merchant;
         this.balance = balance;
+        this.adjusted = adjusted;
     }
 
     public BankTransaction(long id, int month, int day, int hour, int minute, BigDecimal amount, String merchant) {
@@ -79,6 +84,10 @@ public class BankTransaction {
 
     public BigDecimal getBalance() {
         return balance;
+    }
+
+    public boolean isAdjusted() {
+        return adjusted;
     }
 
     @Override

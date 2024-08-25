@@ -16,10 +16,13 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.io.WritableResource;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
 import xyz.sadiulhakim.project2.transaction.*;
 
 import javax.sql.DataSource;
+import java.math.BigDecimal;
+import java.math.RoundingMode;
 
 @Slf4j
 @Configuration
@@ -31,10 +34,12 @@ public class BatchConfig {
     @Value("file:monthly_balance.json")
     private WritableResource monthlyBalanceJsonResource;
 
+
     public static final String POSITIVE = "POSITIVE";
     public static final String NEGATIVE = "NEGATIVE";
 
     @Bean
+    @Qualifier
     public Job bankTransactionAnalysisJob(JobRepository jobRepository,
                                           @Qualifier("fillBalanceStep") Step fillBalanceStep,
                                           @Qualifier("aggregateByMerchantMonthlyStep") Step aggregateByMerchantMonthlyStep,
@@ -151,5 +156,70 @@ public class BatchConfig {
                 // Querying the database in chinks of 5
                 .pageSize(5)
                 .build();
+    }
+
+
+    // Balance Adjuster
+
+    private static class CurrencyAdjustment{
+        long id;
+        BigDecimal adjustedAmount;
+    }
+
+    @Bean
+    @Qualifier
+    public Job balanceAdjusterJob(JobRepository jobRepository,
+                                  @Qualifier("balanceAdjusterStep") Step balanceAdjusterStep){
+        return new JobBuilder("balanceAdjuster-Job",jobRepository)
+                .start(balanceAdjusterStep)
+                .build();
+
+    }
+
+    @Bean
+    @Qualifier
+    public Step balanceAdjusterStep(JobRepository jobRepository,PlatformTransactionManager transactionManager,
+                                    DataSource dataSource,
+                                    @Value("${currency.adjustment.rate}") double rate,
+                                    @Value("${currency.adjustment.disallowed.merchant}") String disallowedMerchant){
+        return new StepBuilder("balanceAdjuster-Step",jobRepository)
+                .<BankTransaction,CurrencyAdjustment>chunk(1,transactionManager)
+                .reader(new JdbcCursorItemReaderBuilder<BankTransaction>()
+                        .name("balanceAdjuster-reader")
+                        .dataSource(dataSource)
+                        .sql(BankTransaction.SELECT_ALL_QUERY+" where adjusted = false")
+                        .rowMapper(BankTransaction.ROW_MAPPER)
+                        .saveState(false)
+                        .build()
+                )
+                .processor(item -> {
+                    CurrencyAdjustment currencyAdjustment = new CurrencyAdjustment();
+                    currencyAdjustment.id = item.getId();
+                    currencyAdjustment.adjustedAmount = item.getAmount()
+                            .multiply(BigDecimal.valueOf(rate))
+                            .setScale(2, RoundingMode.HALF_UP);
+                    return currencyAdjustment;
+                })
+                .writer(new JdbcBatchItemWriterBuilder<CurrencyAdjustment>()
+                        .dataSource(dataSource)
+                        .itemPreparedStatementSetter(((item, ps) -> {
+                            ps.setBigDecimal(1, item.adjustedAmount);
+                            ps.setBoolean(2, true); // Flag is set to true now
+                            ps.setLong(3, item.id);
+                        }))
+                        .sql("update bank_transaction set amount = ?, adjusted = ? where id = ?")
+                        .build()
+                )
+                .listener(new StepExecutionListener() {
+                    @Override
+                    public void beforeStep(StepExecution stepExecution) {
+                        JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource);
+
+                        jdbcTemplate.update("alter table bank_transaction add column if not exists adjusted boolean default false");
+                    }
+                })
+                .allowStartIfComplete(true)
+                .build();
+
     }
 }

@@ -21,8 +21,6 @@ import org.springframework.transaction.PlatformTransactionManager;
 import xyz.sadiulhakim.project2.transaction.*;
 
 import javax.sql.DataSource;
-import java.math.BigDecimal;
-import java.math.RoundingMode;
 
 @Slf4j
 @Configuration
@@ -48,7 +46,7 @@ public class BatchConfig {
         return new JobBuilder("bankTransactionAnalysis-job", jobRepository)
                 .start(fillBalanceStep)
                 .on(NEGATIVE).to(aggregateByMerchantMonthlyStep)
-                .from(fillBalanceStep).on(NEGATIVE).to(aggregateByMerchantDailyStep)
+                .from(fillBalanceStep).on(POSITIVE).to(aggregateByMerchantDailyStep)
                 .from(fillBalanceStep).on("*").end()
                 .end()
                 .build();
@@ -131,7 +129,7 @@ public class BatchConfig {
     }
 
     @Bean
-    @Qualifier("merchantMonthAggregationReader")
+    @Qualifier
     public ItemReader<MerchantMonthBalance> merchantMonthAggregationReader(DataSource sourceDataSource) {
         // Paging-style reader
         return new JdbcPagingItemReaderBuilder<MerchantMonthBalance>()
@@ -158,19 +156,11 @@ public class BatchConfig {
                 .build();
     }
 
-
-    // Balance Adjuster
-
-    private static class CurrencyAdjustment{
-        long id;
-        BigDecimal adjustedAmount;
-    }
-
     @Bean
     @Qualifier
     public Job balanceAdjusterJob(JobRepository jobRepository,
-                                  @Qualifier("balanceAdjusterStep") Step balanceAdjusterStep){
-        return new JobBuilder("balanceAdjuster-Job",jobRepository)
+                                  @Qualifier("balanceAdjusterStep") Step balanceAdjusterStep) {
+        return new JobBuilder("balanceAdjuster-Job", jobRepository)
                 .start(balanceAdjusterStep)
                 .build();
 
@@ -178,28 +168,24 @@ public class BatchConfig {
 
     @Bean
     @Qualifier
-    public Step balanceAdjusterStep(JobRepository jobRepository,PlatformTransactionManager transactionManager,
+    public Step balanceAdjusterStep(JobRepository jobRepository, PlatformTransactionManager transactionManager,
                                     DataSource dataSource,
                                     @Value("${currency.adjustment.rate}") double rate,
-                                    @Value("${currency.adjustment.disallowed.merchant}") String disallowedMerchant){
-        return new StepBuilder("balanceAdjuster-Step",jobRepository)
-                .<BankTransaction,CurrencyAdjustment>chunk(1,transactionManager)
+                                    @Value("${currency.adjustment.disallowed.merchant}") String disallowedMerchant) {
+
+        var processor = new BalanceAdjusterProcessor();
+
+        return new StepBuilder("balanceAdjuster-Step", jobRepository)
+                .<BankTransaction, CurrencyAdjustment>chunk(1, transactionManager)
                 .reader(new JdbcCursorItemReaderBuilder<BankTransaction>()
                         .name("balanceAdjuster-reader")
                         .dataSource(dataSource)
-                        .sql(BankTransaction.SELECT_ALL_QUERY+" where adjusted = false")
+                        .sql(BankTransaction.SELECT_ALL_QUERY + " where adjusted = false")
                         .rowMapper(BankTransaction.ROW_MAPPER)
                         .saveState(false)
                         .build()
                 )
-                .processor(item -> {
-                    CurrencyAdjustment currencyAdjustment = new CurrencyAdjustment();
-                    currencyAdjustment.id = item.getId();
-                    currencyAdjustment.adjustedAmount = item.getAmount()
-                            .multiply(BigDecimal.valueOf(rate))
-                            .setScale(2, RoundingMode.HALF_UP);
-                    return currencyAdjustment;
-                })
+                .processor(processor)
                 .writer(new JdbcBatchItemWriterBuilder<CurrencyAdjustment>()
                         .dataSource(dataSource)
                         .itemPreparedStatementSetter(((item, ps) -> {
@@ -214,8 +200,18 @@ public class BatchConfig {
                     @Override
                     public void beforeStep(StepExecution stepExecution) {
                         JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource);
-
                         jdbcTemplate.update("alter table bank_transaction add column if not exists adjusted boolean default false");
+
+                        processor.setStepExecution(stepExecution);
+                        processor.setRate(rate);
+                    }
+                }).listener(new ItemReadListener<>() {
+
+                    @Override
+                    public void afterRead(BankTransaction item) {
+                        if (item.getMerchant().equals(disallowedMerchant)) {
+                            processor.safeExit();
+                        }
                     }
                 })
                 .allowStartIfComplete(true)

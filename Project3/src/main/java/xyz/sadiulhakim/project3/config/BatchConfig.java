@@ -11,6 +11,7 @@ import org.springframework.batch.core.repository.JobRepository;
 import org.springframework.batch.core.step.builder.StepBuilder;
 import org.springframework.batch.core.step.tasklet.JvmCommandRunner;
 import org.springframework.batch.core.step.tasklet.Tasklet;
+import org.springframework.batch.item.Chunk;
 import org.springframework.batch.item.ItemProcessor;
 import org.springframework.batch.item.ItemReader;
 import org.springframework.batch.item.file.FlatFileHeaderCallback;
@@ -27,6 +28,9 @@ import org.springframework.core.io.Resource;
 import org.springframework.core.io.WritableResource;
 import org.springframework.core.task.SimpleAsyncTaskExecutor;
 import org.springframework.core.task.TaskExecutor;
+import org.springframework.retry.RetryCallback;
+import org.springframework.retry.RetryContext;
+import org.springframework.retry.RetryListener;
 import org.springframework.transaction.PlatformTransactionManager;
 import xyz.sadiulhakim.project3.teamScore.*;
 
@@ -120,6 +124,54 @@ public class BatchConfig {
                         .fieldExtractor(item -> new Object[]{item.name(), item.averageScore()})
                         .build()
                 )
+                .listener(new ItemReadListener<>() {
+                    @Override
+                    public void beforeRead() {
+                        ItemReadListener.super.beforeRead();
+                    }
+
+                    @Override
+                    public void onReadError(Exception ex) {
+                        ItemReadListener.super.onReadError(ex);
+                    }
+
+                    @Override
+                    public void afterRead(Team item) {
+                        ItemReadListener.super.afterRead(item);
+                    }
+                })
+                .listener(new ItemProcessListener<>() {
+                    @Override
+                    public void beforeProcess(Team item) {
+                        ItemProcessListener.super.beforeProcess(item);
+                    }
+
+                    @Override
+                    public void afterProcess(Team item, AverageScoredTeam result) {
+                        ItemProcessListener.super.afterProcess(item, result);
+                    }
+
+                    @Override
+                    public void onProcessError(Team item, Exception e) {
+                        ItemProcessListener.super.onProcessError(item, e);
+                    }
+                })
+                .listener(new ItemWriteListener<>() {
+                    @Override
+                    public void beforeWrite(Chunk<? extends AverageScoredTeam> items) {
+                        ItemWriteListener.super.beforeWrite(items);
+                    }
+
+                    @Override
+                    public void afterWrite(Chunk<? extends AverageScoredTeam> items) {
+                        ItemWriteListener.super.afterWrite(items);
+                    }
+
+                    @Override
+                    public void onWriteError(Exception exception, Chunk<? extends AverageScoredTeam> items) {
+                        ItemWriteListener.super.onWriteError(exception, items);
+                    }
+                })
                 .listener(jobStartLoggerListener)
                 .listener(teamAverageContextPromotionListener)
                 .listener(new StepExecutionListener() {
@@ -138,9 +190,46 @@ public class BatchConfig {
                 .skip(IndexOutOfBoundsException.class)
                 .noSkip(NullPointerException.class)
                 .skipLimit(40)
+                .listener(new SkipListener<>() {
+                    @Override
+                    public void onSkipInRead(Throwable t) {
+                        SkipListener.super.onSkipInRead(t);
+                    }
+
+                    @Override
+                    public void onSkipInWrite(AverageScoredTeam item, Throwable t) {
+                        SkipListener.super.onSkipInWrite(item, t);
+                    }
+
+                    @Override
+                    public void onSkipInProcess(Team item, Throwable t) {
+                        SkipListener.super.onSkipInProcess(item, t);
+                    }
+                })
                 .retry(RuntimeException.class)
                 .noRetry(NullPointerException.class)
                 .retryLimit(40)
+                .listener(new RetryListener() {
+                    @Override
+                    public <T, E extends Throwable> boolean open(RetryContext context, RetryCallback<T, E> callback) {
+                        return RetryListener.super.open(context, callback);
+                    }
+
+                    @Override
+                    public <T, E extends Throwable> void close(RetryContext context, RetryCallback<T, E> callback, Throwable throwable) {
+                        RetryListener.super.close(context, callback, throwable);
+                    }
+
+                    @Override
+                    public <T, E extends Throwable> void onSuccess(RetryContext context, RetryCallback<T, E> callback, T result) {
+                        RetryListener.super.onSuccess(context, callback, result);
+                    }
+
+                    @Override
+                    public <T, E extends Throwable> void onError(RetryContext context, RetryCallback<T, E> callback, Throwable throwable) {
+                        RetryListener.super.onError(context, callback, throwable);
+                    }
+                })
                 .build();
     }
 
